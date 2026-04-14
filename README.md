@@ -78,11 +78,71 @@ Upload a photo of skin with acne and the model tells you which type of acne it i
 - Confusion matrix (raw counts + normalised)
 - Grad-CAM heatmaps on random test samples
 
-### Inference
+### Loading the Model & Running Inference
+
+The saved checkpoint (`outputs/best_model.pth`) stores the model weights, class names, and backbone name so it is self-contained.
+
+**Quick start — use the notebook's built-in `predict()` function (Section 9):**
 ```python
-result = predict('path/to/image.jpg')
-# Returns: predicted_class, confidence, per-class probabilities
-# Displays: image + probability bar chart
+# Run all cells first so the model is loaded, then:
+result = predict('path/to/your/image.jpg')
+print(result)
+# {'predicted_class': 'acne-papulopustulosa', 'confidence': 0.87,
+#  'probabilities': {'acne-comedonica': 0.05, 'acne-conglobata': 0.08, 'acne-papulopustulosa': 0.87}}
+```
+
+**Standalone script — load the checkpoint in any Python file:**
+```python
+import torch
+import timm
+import torch.nn as nn
+from torchvision import transforms
+from PIL import Image
+
+# ── 1. Load checkpoint ────────────────────────────────────────────────
+ckpt = torch.load('outputs/best_model.pth', map_location='cuda')
+CLASS_NAMES = ckpt['class_names']   # ['acne-comedonica', 'acne-conglobata', 'acne-papulopustulosa']
+BACKBONE    = ckpt['backbone']      # 'efficientnet_b3'
+
+# ── 2. Rebuild model architecture ─────────────────────────────────────
+model = timm.create_model(BACKBONE, pretrained=False, num_classes=0)
+in_features = model.num_features
+model.classifier = nn.Sequential(
+    nn.Dropout(p=0.4),
+    nn.Linear(in_features, len(CLASS_NAMES))
+)
+model.load_state_dict(ckpt['model_state'])
+model.eval().cuda()
+
+# ── 3. Preprocess image ───────────────────────────────────────────────
+tf = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225]),
+])
+
+img = Image.open('your_image.jpg').convert('RGB')
+inp = tf(img).unsqueeze(0).cuda()   # shape: [1, 3, 224, 224]
+
+# ── 4. Predict ────────────────────────────────────────────────────────
+with torch.no_grad():
+    probs = torch.softmax(model(inp), dim=1).squeeze().cpu().numpy()
+
+pred_class  = CLASS_NAMES[probs.argmax()]
+confidence  = probs.max()
+
+print(f'Predicted : {pred_class}')
+print(f'Confidence: {confidence:.1%}')
+print(f'All probs : { {c: f"{p:.1%}" for c, p in zip(CLASS_NAMES, probs)} }')
+```
+
+**No GPU? Run on CPU instead:**
+```python
+# Replace every .cuda() with .cpu() and map_location='cpu':
+ckpt  = torch.load('outputs/best_model.pth', map_location='cpu')
+model = model.cpu()
+inp   = tf(img).unsqueeze(0)   # no .cuda()
 ```
 
 ### Setup
