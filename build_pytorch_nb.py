@@ -14,11 +14,11 @@ cells = []
 # ── 0. Title ──────────────────────────────────────────────────────────
 cells.append(md("cell-00-title", """\
 # Acne Type Classifier
-**EfficientNet-B3 / ResNet-50 -- 3-class severity classification**
+**EfficientNet-B3 -- 5-class acne type classification**
 
-**Classes:** `acne-comedonica` · `acne-conglobata` · `acne-papulopustulosa`
+**Classes:** `Blackheads` · `Cyst` · `Papules` · `Pustules` · `Whiteheads`
 
-**Dataset:** Roboflow `Acne type classification v3` -- 726 train / 28 test images
+**Dataset:** Kaggle `AcneDataset` -- 2,778 train / 921 val / 918 test images
 
 ---
 1. Install & Imports
@@ -80,9 +80,8 @@ cells.append(md("cell-04-sec2", "## 2. Configuration"))
 
 cells.append(code("cell-05-config", """\
 # -- Paths ---------------------------------------------------------------
-DATA_ROOT    = 'acne dataset'
-OUTPUT_DIR   = 'outputs'
-VAL_FRACTION = 0.15
+DATA_ROOT  = 'AcneDataset'   # Kaggle dataset (train / valid / test pre-split)
+OUTPUT_DIR = 'outputs'
 
 # -- Model ---------------------------------------------------------------
 BACKBONE     = 'efficientnet_b3'
@@ -98,9 +97,9 @@ WEIGHT_DECAY        = 1e-4
 FREEZE_EPOCHS       = 5
 WARMUP_EPOCHS       = 5
 SCHEDULER           = 'cosine'
-EARLY_STOP_PATIENCE = 10
-IMBALANCE           = 'weighted'   # 'weighted' | 'oversample'
-MIXUP_ALPHA         = 0.4          # set 0 to disable
+EARLY_STOP_PATIENCE = 12
+IMBALANCE           = 'weighted'   # 'weighted' | 'oversample' (Whiteheads is small)
+MIXUP_ALPHA         = 0.3          # set 0 to disable
 
 USE_AMP      = True    # mixed precision -- requires CUDA
 NUM_WORKERS  = 0       # keep 0 on Windows Jupyter
@@ -150,7 +149,7 @@ CLASS_NAMES = get_class_names(DATA_ROOT, 'train')
 NUM_CLASSES = len(CLASS_NAMES)
 print(f'Classes ({NUM_CLASSES}):', CLASS_NAMES)
 
-for split in ('train', 'test'):
+for split in ('train', 'valid', 'test'):
     counts = {cls: len(list_images(Path(DATA_ROOT) / split / cls))
               for cls in CLASS_NAMES}
     print(f'{split:5s}: {counts}  -> total {sum(counts.values())}')
@@ -191,7 +190,7 @@ plt.show()\
 cells.append(md("cell-09-sec4", "## 4. Dataset & DataLoaders"))
 
 cells.append(code("cell-10-dataset", """\
-# -- Build sample lists ------------------------------------------------
+# -- Build sample lists (uses pre-split train / valid / test folders) --
 def build_samples(root, split, class_names):
     samples = []
     for label, cls in enumerate(class_names):
@@ -201,23 +200,9 @@ def build_samples(root, split, class_names):
                 samples.append((str(p), label))
     return samples
 
-def split_train_val(samples, val_fraction, seed=42):
-    \"\"\"Stratified split -- keeps class balance in val.\"\"\"
-    rng = random.Random(seed)
-    by_class = {}
-    for path, label in samples:
-        by_class.setdefault(label, []).append((path, label))
-    train_s, val_s = [], []
-    for label, items in by_class.items():
-        rng.shuffle(items)
-        n_val = max(1, int(len(items) * val_fraction))
-        val_s   += items[:n_val]
-        train_s += items[n_val:]
-    return train_s, val_s
-
-all_train    = build_samples(DATA_ROOT, 'train', CLASS_NAMES)
-test_samples = build_samples(DATA_ROOT, 'test',  CLASS_NAMES)
-train_samples, val_samples = split_train_val(all_train, VAL_FRACTION, SEED)
+train_samples = build_samples(DATA_ROOT, 'train', CLASS_NAMES)
+val_samples   = build_samples(DATA_ROOT, 'valid', CLASS_NAMES)
+test_samples  = build_samples(DATA_ROOT, 'test',  CLASS_NAMES)
 
 print(f'Train: {len(train_samples)} | Val: {len(val_samples)} | Test: {len(test_samples)}')
 for name, slist in [('Train', train_samples), ('Val', val_samples), ('Test', test_samples)]:
@@ -230,16 +215,17 @@ MEAN = [0.485, 0.456, 0.406]
 STD  = [0.229, 0.224, 0.225]
 
 train_tf = transforms.Compose([
-    transforms.Resize((IMAGE_SIZE + 20, IMAGE_SIZE + 20)),
+    transforms.Resize((IMAGE_SIZE + 32, IMAGE_SIZE + 32)),
     transforms.RandomCrop(IMAGE_SIZE),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(p=0.2),
-    transforms.RandomRotation(degrees=15),
+    transforms.RandomRotation(degrees=20),
     transforms.RandomAffine(degrees=0, shear=10),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.05),
-    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5)),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05),
+    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
     transforms.ToTensor(),
     transforms.Normalize(MEAN, STD),
+    transforms.RandomErasing(p=0.2, scale=(0.02, 0.15)),  # occlusion robustness
 ])
 
 val_tf = transforms.Compose([
@@ -538,7 +524,7 @@ axes[1].plot(history['train_acc'], label='Train')
 axes[1].plot(history['val_acc'],   label='Val')
 axes[1].set_title('Accuracy'); axes[1].set_xlabel('Epoch'); axes[1].legend()
 
-plt.suptitle(f'{BACKBONE} -- Training History', fontsize=13)
+plt.suptitle(f'{BACKBONE} | AcneDataset (5 classes) -- Training History', fontsize=13)
 plt.tight_layout()
 plt.savefig(os.path.join(OUTPUT_DIR, 'training_curves.png'), dpi=150)
 plt.show()\
@@ -548,7 +534,7 @@ plt.show()\
 cells.append(md("cell-17-sec7", "## 7. Evaluation"))
 
 cells.append(code("cell-18-eval", """\
-ckpt = torch.load(os.path.join(OUTPUT_DIR, 'best_model.pth'), map_location=DEVICE)
+ckpt = torch.load(os.path.join(OUTPUT_DIR, 'best_model.pth'), map_location=DEVICE, weights_only=False)
 model.load_state_dict(ckpt['model_state'])
 print(f"Best epoch {ckpt['epoch']}  "
       f"val_loss={ckpt['val_loss']:.4f}  val_acc={ckpt['val_acc']:.4f}")
@@ -574,7 +560,13 @@ test_preds, test_labels_np, test_probs = collect_predictions(model, test_loader)
 test_acc = (test_preds == test_labels_np).mean()
 print(f'\\nTest Accuracy: {test_acc:.4f} ({test_acc * 100:.1f}%)')
 print('\\nClassification Report:')
-print(classification_report(test_labels_np, test_preds, target_names=CLASS_NAMES))\
+print(classification_report(test_labels_np, test_preds, target_names=CLASS_NAMES))
+
+print('\\nPer-class accuracy:')
+for i, cls in enumerate(CLASS_NAMES):
+    mask = test_labels_np == i
+    cls_acc = (test_preds[mask] == test_labels_np[mask]).mean() if mask.sum() > 0 else 0.0
+    print(f'  {cls:<15s}: {cls_acc:.1%}  ({mask.sum()} images)')\
 """))
 
 cells.append(code("cell-19-cm", """\
