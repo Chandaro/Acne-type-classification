@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔬 Acne Type Classifier
+# 🔬 Acne Type Classifie
 
 **Deep learning model that classifies acne type from skin photos**
 
